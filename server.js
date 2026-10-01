@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const IS_STAGING = process.env.USERNODE_ENV === 'staging';
 
 // The platform signs user-identity tokens with an RSA private key it never
 // shares. Containers get only the PUBLIC half, so this app can verify who a
@@ -100,7 +101,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/health', (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ status: 'shutting-down' });
+  res.json({ status: 'ok' });
+});
 
 // The template ships no favicon file; index.html carries an inline SVG
 // icon instead. Answer 204 here so anything that still probes
@@ -109,31 +113,236 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // fresh load.
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
-// Button press
-app.post('/api/press', async (req, res) => {
+// ── Polls ─────────────────────────────────────────────────────────────────
+// One-question polls with 2-4 options, one vote per user per poll.
+// All three tables stay public: poll questions, options and tallies are
+// content every user of the app already sees in the UI (same category as
+// posts and leaderboards), and votes are attributed by platform username.
+
+async function migrate() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS polls (
+      id SERIAL PRIMARY KEY,
+      question VARCHAR(280) NOT NULL,
+      user_id INTEGER NOT NULL,
+      username VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS poll_options (
+      id SERIAL PRIMARY KEY,
+      poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+      label VARCHAR(120) NOT NULL,
+      position SMALLINT NOT NULL
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS poll_votes (
+      id SERIAL PRIMARY KEY,
+      poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+      option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL,
+      username VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (poll_id, user_id)
+    )
+  `);
+}
+
+// Staging starts from a copy of production, so these tables are EMPTY there
+// until this seed runs. Fixed ids, obviously-fake "Staging demo" questions,
+// fake identities only (never the visitor), idempotent on every rebuild.
+// The demo votes belong to fake voter ids, so nothing here fabricates an
+// answer for the signed-in tester's own vote state.
+async function seedStaging() {
+  if (!IS_STAGING) return;
+  await pool.query(`
+    INSERT INTO polls (id, question, user_id, username) VALUES
+      (1, 'Staging demo: quick lunch spot near the office?', 900001, 'staging-demo-user'),
+      (2, 'Staging demo: best day for the weekly run club?', 900001, 'staging-demo-user'),
+      (3, 'Staging demo: which color for the app accent?', 900002, 'staging-demo-user-2')
+    ON CONFLICT (id) DO NOTHING
+  `);
+  await pool.query(`
+    INSERT INTO poll_options (id, poll_id, label, position) VALUES
+      (11, 1, 'Nasi goreng', 0), (12, 1, 'Sushi', 1), (13, 1, 'Burger', 2),
+      (21, 2, 'Saturday morning', 0), (22, 2, 'Sunday evening', 1),
+      (31, 3, 'Violet', 0), (32, 3, 'Teal', 1), (33, 3, 'Amber', 2)
+    ON CONFLICT (id) DO NOTHING
+  `);
+  await pool.query(`
+    INSERT INTO poll_votes (poll_id, option_id, user_id, username) VALUES
+      (1, 11, 900101, 'staging-demo-voter-1'),
+      (1, 11, 900102, 'staging-demo-voter-2'),
+      (1, 13, 900103, 'staging-demo-voter-3'),
+      (2, 21, 900101, 'staging-demo-voter-1'),
+      (3, 31, 900102, 'staging-demo-voter-2'),
+      (3, 32, 900103, 'staging-demo-voter-3'),
+      (3, 31, 900104, 'staging-demo-voter-4')
+    ON CONFLICT (poll_id, user_id) DO NOTHING
+  `);
+  // The explicit-id seed leaves the SERIAL sequences behind; bump them so
+  // the next user-created poll gets an id above the seeded ones.
+  await pool.query(`SELECT setval(pg_get_serial_sequence('polls', 'id'), (SELECT MAX(id) FROM polls))`);
+  await pool.query(`SELECT setval(pg_get_serial_sequence('poll_options', 'id'), (SELECT MAX(id) FROM poll_options))`);
+}
+
+// One round trip per poll list/detail: options with their live vote counts
+// stitched in as JSON, plus the poll's total.
+const POLL_SELECT = `
+  SELECT p.id, p.question, p.username, p.created_at AS "createdAt",
+    COALESCE(
+      json_agg(
+        json_build_object('id', o.id, 'label', o.label, 'votes', COALESCE(v.cnt, 0))
+        ORDER BY o.position, o.id
+      ) FILTER (WHERE o.id IS NOT NULL),
+      '[]'
+    ) AS options,
+    COALESCE(SUM(v.cnt), 0)::int AS total
+  FROM polls p
+  LEFT JOIN poll_options o ON o.poll_id = p.id
+  LEFT JOIN (
+    SELECT option_id, COUNT(*) AS cnt FROM poll_votes GROUP BY option_id
+  ) v ON v.option_id = o.id
+`;
+
+function shapePoll(row, myOptionId) {
+  return {
+    id: row.id,
+    question: row.question,
+    username: row.username,
+    createdAt: row.createdAt,
+    total: row.total,
+    myOptionId: myOptionId || null,
+    options: (row.options || []).map((o) => ({
+      id: o.id, label: o.label, votes: Number(o.votes),
+    })),
+  };
+}
+
+async function fetchPoll(pollId, user) {
+  const { rows } = await pool.query(POLL_SELECT + `
+    WHERE p.id = $1 GROUP BY p.id
+  `, [pollId]);
+  if (!rows.length) return null;
+  let myOptionId = null;
+  if (user) {
+    const mine = await pool.query(
+      'SELECT option_id FROM poll_votes WHERE poll_id = $1 AND user_id = $2',
+      [pollId, user.id]
+    );
+    if (mine.rows.length) myOptionId = mine.rows[0].option_id;
+  }
+  return shapePoll(rows[0], myOptionId);
+}
+
+// Poll list, newest first, with the caller's own vote per poll so cards can
+// show a "Voted" chip.
+app.get('/api/polls', async (req, res) => {
   try {
-    await pool.query(`
-      INSERT INTO presses (user_id, username) VALUES ($1, $2)
-    `, [req.user.id, req.user.username]);
-    res.json({ ok: true });
+    const { rows } = await pool.query(POLL_SELECT + `
+      GROUP BY p.id ORDER BY p.created_at DESC, p.id DESC
+    `);
+    let mine = new Map();
+    if (req.user) {
+      const myVotes = await pool.query(
+        'SELECT poll_id, option_id FROM poll_votes WHERE user_id = $1',
+        [req.user.id]
+      );
+      mine = new Map(myVotes.rows.map((r) => [r.poll_id, r.option_id]));
+    }
+    res.json({ polls: rows.map((r) => shapePoll(r, mine.get(r.id))) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('GET /api/polls failed', err.message);
+    res.status(500).json({ error: 'Could not load polls' });
   }
 });
 
-// Leaderboard
-app.get('/api/leaderboard', async (_req, res) => {
+app.get('/api/polls/:id', async (req, res) => {
+  const pollId = /^\d+$/.test(req.params.id) ? Number(req.params.id) : null;
+  if (!pollId) return res.status(404).json({ error: 'Poll not found' });
   try {
-    const { rows } = await pool.query(`
-      SELECT username, COUNT(*) as presses
-      FROM presses
-      GROUP BY username
-      ORDER BY presses DESC
-      LIMIT 50
-    `);
-    res.json({ leaderboard: rows });
+    const poll = await fetchPoll(pollId, req.user);
+    if (!poll) return res.status(404).json({ error: 'Poll not found' });
+    res.json({ poll });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('GET /api/polls/:id failed', err.message);
+    res.status(500).json({ error: 'Could not load the poll' });
+  }
+});
+
+// Create a poll: question of at least 3 characters, 2-4 non-empty options.
+app.post('/api/polls', async (req, res) => {
+  const body = req.body || {};
+  const question = typeof body.question === 'string' ? body.question.trim() : '';
+  const rawOptions = Array.isArray(body.options) ? body.options : [];
+  const options = rawOptions
+    .map((o) => (typeof o === 'string' ? o.trim() : ''))
+    .filter(Boolean);
+  if (question.length < 3) {
+    return res.status(400).json({ error: 'Question needs at least 3 characters.' });
+  }
+  if (question.length > 280) {
+    return res.status(400).json({ error: 'Question is limited to 280 characters.' });
+  }
+  if (options.length < 2 || options.length > 4) {
+    return res.status(400).json({ error: 'A poll needs between 2 and 4 options.' });
+  }
+  if (options.some((o) => o.length > 120)) {
+    return res.status(400).json({ error: 'Each option is limited to 120 characters.' });
+  }
+  try {
+    const inserted = await pool.query(
+      'INSERT INTO polls (question, user_id, username) VALUES ($1, $2, $3) RETURNING id',
+      [question, req.user.id, req.user.username]
+    );
+    const pollId = inserted.rows[0].id;
+    await pool.query(
+      'INSERT INTO poll_options (poll_id, label, position) SELECT $1, x.label, x.position FROM unnest($2::text[], $3::int[]) AS x(label, position)',
+      [pollId, options, options.map((_, i) => i)]
+    );
+    const poll = await fetchPoll(pollId, req.user);
+    res.status(201).json({ poll });
+  } catch (err) {
+    console.error('POST /api/polls failed', err.message);
+    res.status(500).json({ error: 'Could not create the poll' });
+  }
+});
+
+// One-tap vote. One vote per user per poll (UNIQUE constraint); voting again
+// answers 409 with the current results rather than changing the vote.
+app.post('/api/polls/:id/vote', async (req, res) => {
+  const pollId = /^\d+$/.test(req.params.id) ? Number(req.params.id) : null;
+  const optionId = Number(req.body && req.body.optionId);
+  if (!pollId) return res.status(404).json({ error: 'Poll not found' });
+  if (!Number.isInteger(optionId)) {
+    return res.status(400).json({ error: 'Pick an option to vote.' });
+  }
+  try {
+    const pollRow = await pool.query('SELECT id FROM polls WHERE id = $1', [pollId]);
+    if (!pollRow.rowCount) return res.status(404).json({ error: 'Poll not found' });
+    const option = await pool.query(
+      'SELECT id FROM poll_options WHERE id = $1 AND poll_id = $2',
+      [optionId, pollId]
+    );
+    if (!option.rowCount) {
+      return res.status(400).json({ error: 'That option is not on this poll.' });
+    }
+    const vote = await pool.query(`
+      INSERT INTO poll_votes (poll_id, option_id, user_id, username)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (poll_id, user_id) DO NOTHING
+      RETURNING id
+    `, [pollId, optionId, req.user.id, req.user.username]);
+    if (!vote.rowCount) {
+      return res.status(409).json({ error: 'You already voted on this poll.' });
+    }
+    const poll = await fetchPoll(pollId, req.user);
+    res.json({ poll });
+  } catch (err) {
+    console.error('POST /api/polls/:id/vote failed', err.message);
+    res.status(500).json({ error: 'Could not record the vote' });
   }
 });
 
@@ -174,16 +383,43 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Malformed JSON bodies and unexpected errors answer as JSON, not an HTML
+// express default page.
+app.use((err, _req, res, _next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid request body' });
+  }
+  console.error('unhandled error', err);
+  res.status(500).json({ error: 'Something went wrong' });
+});
+
+const DRAIN_MS = 3000;
+let shuttingDown = false;
+let server;
+
+async function shutdown(signal) {
+  if (shuttingDown) return; // idempotent: SIGTERM then SIGINT must not double-run
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, draining`);
+  server.close(() => {});
+  server.closeIdleConnections?.();
+  const t = setTimeout(() => server.closeAllConnections?.(), DRAIN_MS);
+  t.unref?.();
+  try {
+    await pool.end();
+  } catch (e) {
+    console.error('[shutdown] pool.end failed', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 async function start() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS presses (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL,
-      username VARCHAR(255) NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-  const server = app.listen(port, () => console.log(`Listening on :${port}`));
+  await migrate();
+  await seedStaging();
+  server = app.listen(port, () => console.log(`Listening on :${port}`));
   // Let Envoy retire idle upstream connections at 60s, with a 15s margin.
   server.keepAliveTimeout = 75_000;
 }
