@@ -1,27 +1,35 @@
 # Poll Kilat
 
-> **Starter template** — this repo was scaffolded by Homeroom Social
-> Vibecoding. Everything in it is placeholder example code until the
-> app's first real feature is built.
+One-question polls with one-tap voting and live results, built for Homeroom.
 
-The scaffold is a small working demo that proves the plumbing works:
+- **Poll list** (`/`) — every open poll as a card: question, options, vote
+  counts and animated live bars for the current tally.
+- **Poll detail** (`/poll/:id`) — tap an option to vote (one vote per person
+  per poll); results with percentages and bars appear instantly and refresh
+  live while the screen is open.
+- **Create a poll** (`/new`) — a question (3-280 characters) and 2-4 options.
 
-- **Sign-in** — the server verifies the platform-issued user token
-  (an RS256 JWT) on every request, so the app already knows who is
-  using it. No accounts to build.
-- **Database** — the app has its own private Postgres database; the
-  demo stores button presses in a `presses` table.
-- **Live API** — two example routes (`/api/press`,
-  `/api/leaderboard`) read and write through a real Express server.
-- **Styling** — Tailwind CSS, precompiled by `npm run build` during
-  image creation with either Kubernetes/Paketo or standalone Docker.
+## How it works
 
-## Replacing the template
+- **Sign-in** — the server verifies the platform-issued user token (an RS256
+  JWT) on every request, so the app always knows who is voting. No accounts
+  to build.
+- **Database** — the app's own Postgres database holds three tables:
+  `polls`, `poll_options` and `poll_votes` (one vote per user per poll is
+  enforced by a `UNIQUE (poll_id, user_id)` constraint). All three are
+  public: poll content and tallies are what every user of the app already
+  sees in the UI.
+- **Styling** — Tailwind CSS, precompiled by `npm run build` during image
+  creation with either Kubernetes/Paketo or standalone Docker.
 
-Open the app on Homeroom, tap the Homeroom icon in the header, choose
-**Start a new change**, and describe the app you want in plain English.
-The template will be replaced with your real app. You can also run
-Claude Code against this repo directly; start with `CLAUDE.md`, which
-carries the app-specific notes and points at the platform rules.
+## Development
 
-Once the real app exists, rewrite this README to describe it.
+```sh
+npm ci --include=dev
+npm run build   # compiles styles/tailwind-input.css to public/tailwind.css
+npm start
+```
+
+Staging previews boot with three "Staging demo" polls (seeded from
+`server.js`, fake identities only) so the screens are never empty during
+review.

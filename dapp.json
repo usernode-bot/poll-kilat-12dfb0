@@ -1,4 +1,28 @@
 {
   "description": "One-question polls with 2-4 options, one-tap vote, live results.",
-  "secrets": []
+  "secrets": [],
+  "tests": [
+    {
+      "id": "polls.list",
+      "name": "Poll list renders with seeded demo polls",
+      "path": "/",
+      "expectSelector": ".poll-card",
+      "expectText": "Staging demo",
+      "visual": true,
+      "impact": ["public/index.html", "server.js", "dapp.json"]
+    },
+    {
+      "id": "polls.detail",
+      "name": "Poll detail renders vote options",
+      "path": "/poll/1",
+      "expectSelector": ".option-row"
+    },
+    {
+      "id": "polls.create",
+      "name": "Create poll form renders",
+      "path": "/new",
+      "expectSelector": "#create-form",
+      "expectText": "Create poll"
+    }
+  ]
 }
