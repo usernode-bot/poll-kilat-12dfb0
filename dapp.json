@@ -9,7 +9,11 @@
       "expectSelector": ".poll-card",
       "expectText": "Staging demo",
       "visual": true,
-      "impact": ["public/index.html", "server.js", "dapp.json"]
+      "impact": [
+        "public/index.html",
+        "server.js",
+        "dapp.json"
+      ]
     },
     {
       "id": "polls.detail",
@@ -24,5 +28,6 @@
       "expectSelector": "#create-form",
       "expectText": "Create poll"
     }
-  ]
+  ],
+  "name": "Quick Poll"
 }
