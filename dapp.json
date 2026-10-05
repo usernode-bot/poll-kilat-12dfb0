@@ -29,5 +29,6 @@
       "expectText": "Create poll"
     }
   ],
-  "name": "Quick Poll"
+  "name": "Quick Poll",
+  "icon": { "emoji": "📊" }
 }
