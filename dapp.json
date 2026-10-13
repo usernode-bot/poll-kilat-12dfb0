@@ -30,5 +30,5 @@
     }
   ],
   "name": "Quick Poll",
-  "icon": { "emoji": "📊" }
+  "icon": { "image": "brand/icon.png", "emoji": "📊" }
 }

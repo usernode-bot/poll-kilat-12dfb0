@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <!-- Quick Poll featured artwork, dark version: Yellow #FFEE6F mark on Black #000000.
+       Same mark geometry as brand/icon.svg, translated so it centres on the 1600x900 canvas. -->
+  <rect width="1600" height="900" fill="#000000"/>
+  <g transform="translate(288,-62)">
+    <rect x="184" y="544" width="176" height="256" rx="40" fill="#FFEE6F"/>
+    <rect x="424" y="400" width="176" height="400" rx="40" fill="#FFEE6F"/>
+    <rect x="664" y="224" width="176" height="576" rx="40" fill="#FFEE6F"/>
+    <polygon points="780,280 700,432 748,432 724,560 808,400 760,400 788,280" fill="#000000"/>
+  </g>
+</svg>

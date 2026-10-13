@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Quick Poll app icon: three rising bar-chart columns, lightning bolt cut into the tallest.
+       Homeroom brand pairing: Black #000000 mark on Yellow #FFEE6F tile.
+       Flat fills only. Homeroom rounds the tile itself, so the canvas is full-bleed square. -->
+  <rect width="1024" height="1024" fill="#FFEE6F"/>
+  <rect x="184" y="544" width="176" height="256" rx="40" fill="#000000"/>
+  <rect x="424" y="400" width="176" height="400" rx="40" fill="#000000"/>
+  <rect x="664" y="224" width="176" height="576" rx="40" fill="#000000"/>
+  <polygon points="780,280 700,432 748,432 724,560 808,400 760,400 788,280" fill="#FFEE6F"/>
+</svg>
